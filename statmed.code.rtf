@@ -1,0 +1,262 @@
+{\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil\fcharset0 Courier New;}}
+{\*\generator Riched20 10.0.18362}\viewkind4\uc1 
+\pard\f0\fs18\lang1033 ################################################################################\par
+# Uses multiple imputation to impute outcomes under control for matched\par
+# treated subjects.\par
+#\par
+# NOTE: THIS SOFTWARE COMES WITH ABSOLUTELY NO WARRANTY.\par
+#\par
+################################################################################\par
+\par
+library(mvtnorm)\par
+\par
+set.seed(11072019)\par
+# Set random number seed to make results reproducible\par
+\par
+M <- 100\par
+# Number of imputed outcomes under control.\par
+\par
+################################################################################\par
+# Reads in case study data (EFFECT-HF Phase 1 data) and estimates\par
+# the propensity score.\par
+#\par
+# NOTE: The data are not available for public dissemination. Please do not\par
+#       contact the authors for a copy of the dataset.\par
+################################################################################\par
+\par
+sample.df <- read.table("chf.txt",header=T)\par
+\par
+psm <- glm(beta ~ age + sysbp + hrtrate + resp + hgb + wbc + sod + pot +\par
+  glucose + urea + cr +\par
+  female + neckvdis + s3 + s4 + rales + pedm + cmg + diabetes + cvatia +\par
+  prevmi + afib + perartdis + copd + dementia + cirrhos + cancer + lbbb,\par
+  family=binomial,data=sample.df)\par
+\par
+sample.df$ps <- psm$fitted\par
+\par
+sample.df$id <- 1:nrow(sample.df)\par
+# Create id variable for each subject in the random sample.\par
+\par
+sample.df$Y <- sample.df$death.1yr\par
+\par
+remove(psm)\par
+\par
+##############################################################################\par
+# Create data frames for use after matching. These will be used for NNM.\par
+##############################################################################\par
+\par
+sample.df.treat <- subset(sample.df,beta==1)\par
+sample.df.control <- subset(sample.df,beta==0)\par
+# Data frames of treated and control subjects\par
+\par
+sample.df.treat$case.id <- sample.df.treat$id\par
+sample.df.control$control.id <- sample.df.control$id\par
+\par
+sample.df.treat <- subset(sample.df.treat,select=-c(id,ps))\par
+sample.df.control <- subset(sample.df.control,select=-c(id,ps))\par
+# Chanage variable "id" to "case.id" and "control.id" in the\par
+# treated/untreated data frames.\par
+\par
+##############################################################################\par
+# Write data to external file for matching in C.\par
+# This formulation will work for nearest neighbour matching on the propensity\par
+# score.\par
+# Note: Users of this code can replace the matching function with \par
+#       options available in R.\par
+##############################################################################\par
+\par
+attach(sample.df)\par
+write(t(cbind(id[beta==0],ps[beta==0])),ncol=2,file="controls.txt")\par
+write(t(cbind(id[beta==1],ps[beta==1])),ncol=2,file="cases.txt")\par
+detach(sample.df)\par
+\par
+##############################################################################\par
+# Nearest neighbour matching on the PS.\par
+##############################################################################\par
+\par
+cat("Random",file="match.order.txt",fill=T)\par
+cat(1,file="match.caliper.txt",fill=T)\par
+\par
+system('match.run')\par
+\par
+match.pairs <- data.frame( scan("matches.id.txt",list(case.id=0,control.id=0)) )\par
+# List of matched pairs using "case.id" and "control.id"\par
+match.pairs$pair.id <- 1:(nrow(match.pairs))\par
+# Identifier for matched pairs.\par
+\par
+df.match.cases <- merge(sample.df.treat,match.pairs,by="case.id")\par
+df.match.cases <- subset(df.match.cases,select=-control.id)\par
+\par
+df.match.controls <- merge(sample.df.control,match.pairs,by="control.id")\par
+df.match.controls <- subset(df.match.controls,select=-case.id)\par
+# Data frames of matched treated/untreated subjects.\par
+\par
+df.long <- rbind( subset(df.match.cases,select=-case.id),\par
+  subset(df.match.controls,select=-control.id) )\par
+# Dataset consisting of the matched treated and control subjects.\par
+\par
+##############################################################################\par
+# Risk difference in matched sample using the observed outcome under control.\par
+##############################################################################\par
+\par
+p1 <- mean(df.match.cases$Y)\par
+p0 <- mean(df.match.controls$Y)\par
+\par
+Y.treat <- df.match.cases$Y\par
+Y.control <- df.match.controls$Y\par
+b <- length(Y.treat[(Y.treat==1) & (Y.control==0)])\par
+c <- length(Y.treat[(Y.treat==0) & (Y.control==1)])\par
+n <- nrow(df.match.cases)\par
+\par
+p1.nnm <- p1\par
+p0.nnm <- p0\par
+\par
+rd.nnm.crude <- p1 - p0\par
+se.rd.nnm.crude <- sqrt( ((b+c) - ((c-b)^2)/n)/(n^2) )\par
+\par
+ci.lower.nnm.crude <- rd.nnm.crude - 1.96*se.rd.nnm.crude\par
+ci.upper.nnm.crude <- rd.nnm.crude + 1.96*se.rd.nnm.crude\par
+\par
+cat(p1.nnm,p0.nnm,rd.nnm.crude,se.rd.nnm.crude,ci.lower.nnm.crude,\par
+  ci.upper.nnm.crude,file="statmed.code.out1",fill=T,append=F)\par
+\par
+remove(p1,p0,Y.treat,Y.control,b,c,n)\par
+\par
+remove(p1.nnm,p0.nnm,rd.nnm.crude,se.rd.nnm.crude,ci.lower.nnm.crude,\par
+  ci.upper.nnm.crude)\par
+\par
+##############################################################################\par
+# Use the matched control subjects to fit a logistic regression model.\par
+# We apply the fitted logistic regression model to the matched treated\par
+# subjects and determine the probability of an event.\par
+# For each subject, we draw a binary outcome from a Bernoulli distribution\par
+# with this probability. \par
+# This is the subject's imputed potential outcome under control.\par
+##############################################################################\par
+\par
+matched.control.df <- subset(df.long,beta==0)\par
+\par
+lr.control <- glm(Y ~ age + sysbp + hrtrate + resp + hgb + wbc + sod + pot +\par
+  glucose + urea + cr +\par
+  female + neckvdis + s3 + s4 + rales + pedm + cmg + diabetes + cvatia +\par
+  prevmi + afib + perartdis + copd + dementia + cirrhos + cancer + lbbb,\par
+  family=binomial,data=matched.control.df)\par
+\par
+matched.treat.df <- subset(df.long,beta==1)\par
+\par
+xmat.treat <- cbind(1,matched.treat.df$age,matched.treat.df$sysbp,\par
+  matched.treat.df$hrtrate,matched.treat.df$resp,matched.treat.df$hgb,\par
+  matched.treat.df$wbc,matched.treat.df$sod,matched.treat.df$pot,\par
+  matched.treat.df$glucose,matched.treat.df$urea,matched.treat.df$cr,\par
+  matched.treat.df$female,matched.treat.df$neckvdis,matched.treat.df$s3,\par
+  matched.treat.df$s4,matched.treat.df$rales,matched.treat.df$pedm,\par
+  matched.treat.df$cmg,matched.treat.df$diabetes,\par
+  matched.treat.df$cvatia,matched.treat.df$prevmi,matched.treat.df$afib,\par
+  matched.treat.df$perartdis,matched.treat.df$copd,matched.treat.df$dementia,\par
+  matched.treat.df$cirrhos,matched.treat.df$cancer,matched.treat.df$lbbb)\par
+# Matrix of covariates in the matched treated subjects.\par
+# This is used for computing the linear predictor.\par
+\par
+# Vectors for storing pooled risk differences and standard errors when using K\par
+# imputed values (K = 1,...,M).\par
+rd.pooled <- NULL\par
+se.pooled <- NULL\par
+\par
+################################################################################\par
+# Estimate RD and SE when using single imputation (since Rubin's Rules not used)\par
+################################################################################\par
+\par
+beta.sim <- rmvnorm(1,mean=lr.control$coef,\par
+    sigma=summary(lr.control)$cov.unscaled)\par
+# We draw a vector of regression coefficients from the multivariate\par
+# distribution of regression coefficients.\par
+\par
+LP.1.adjust <- xmat.treat %*% matrix(beta.sim,ncol=1)\par
+\par
+n <- nrow(matched.treat.df)\par
+\par
+p0.treat <- plogis(LP.1.adjust)\par
+\par
+rd <- mean(matched.treat.df$Y) - mean(p0.treat)\par
+se.rd <- sqrt(var(matched.treat.df$Y-p0.treat)/n)\par
+\par
+rd.pooled[1] <- rd\par
+se.pooled[1] <- se.rd\par
+# For one imputed estimate, we simply take that estimate.\par
+\par
+remove(beta.sim,LP.1.adjust,n,p0.treat,rd,se.rd)\par
+\par
+################################################################################\par
+# Use multiple imputation and Rubin's Rules\par
+################################################################################\par
+\par
+impute.rd <- NULL\par
+impute.se.rd <- NULL\par
+\par
+for (num.impute in 2:M)\{\par
+  for (i in 1:num.impute)\{\par
+\par
+    beta.sim <- rmvnorm(1,mean=lr.control$coef,\par
+       sigma=summary(lr.control)$cov.unscaled)\par
+    # We draw a vector of regression coefficients from the multivariate\par
+    # distribution of regression coefficients.\par
+\par
+    LP.1.adjust <- xmat.treat %*% matrix(beta.sim,ncol=1)\par
+\par
+    n <- nrow(matched.treat.df)\par
+\par
+    p0.treat <- plogis(LP.1.adjust)\par
+\par
+    rd <- mean(matched.treat.df$Y) - mean(p0.treat)\par
+    se.rd <- sqrt(var(matched.treat.df$Y-p0.treat)/n)\par
+\par
+   impute.rd[i] <- rd\par
+   impute.se.rd[i] <- se.rd\par
+\par
+   remove(beta.sim,LP.1.adjust,n,p0.treat,rd,se.rd)\par
+\par
+  \}\par
+\par
+  ##############################################################################\par
+  # We use Rubin's Rules to combine the estimated risk differences and their\par
+  # standard errors.\par
+  ##############################################################################\par
+\par
+  impute.var <- impute.se.rd^2\par
+  # Variance of the estimated risk difference.\par
+\par
+  rd.pooled[num.impute] <- mean(impute.rd)\par
+\par
+  K <- num.impute\par
+  W <- mean(impute.var)\par
+  B <- (1/(K-1)) * sum((impute.rd-rd.pooled[num.impute])^2) \par
+\par
+  se.pooled[num.impute] <- sqrt(W + (1 + (1/K))*B)\par
+\par
+  remove(impute.var,K,W,B)\par
+\par
+\}\par
+\par
+remove(lr.control)\par
+\par
+##############################################################################\par
+# Compute 95% confidence intervals.\par
+##############################################################################\par
+\par
+ci.lower.impute <- rd.pooled - 1.96*se.pooled\par
+ci.upper.impute <- rd.pooled + 1.96*se.pooled\par
+\par
+##############################################################################\par
+# Store results for later analysis.\par
+############################################################################## \par
+\par
+N.impute <- 1:M\par
+\par
+impute.mat <- cbind(N.impute,rd.pooled,se.pooled,ci.lower.impute,\par
+  ci.upper.impute)\par
+\par
+write.table(impute.mat,file="statmed.code.out2",append=F,row.names=F,\par
+  col.names=T)\par
+\par
+}
+ 
